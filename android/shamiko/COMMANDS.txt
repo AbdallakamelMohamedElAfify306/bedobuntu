@@ -1,0 +1,38 @@
+# One-line commands for the Mac (Pixel 7 Pro on Android, USB debugging on)
+# No bang characters.
+
+# 0) Unpack once (creates $HOME/cheetah-dual/shamiko-kit/)
+mkdir -p $HOME/cheetah-dual && cd $HOME/cheetah-dual && python3 -c "import zipfile; zipfile.ZipFile('$HOME/Downloads/shamiko-kit.zip').extractall()"
+
+# 1) Install Shamiko + soft-disable Zygisk-Assistant + DenyList banks
+bash $HOME/cheetah-dual/shamiko-kit/mac/install.sh
+
+# 2) Reboot when the script says so
+adb reboot
+
+# 3) After phone is up, verify
+bash $HOME/cheetah-dual/shamiko-kit/mac/install.sh verify
+
+# Logs: $HOME/cheetah-dual/shamiko-logs/
+
+# If Magisk --install-module failed, install from Magisk app:
+# Modules - Install from storage - /sdcard/Download/Shamiko-v1.2.5-414-release.zip
+# Then reboot and run verify.
+
+# Manual Magisk Settings after reboot (required):
+# Zygisk ON
+# Enforce DenyList OFF
+# Configure DenyList: tick ALL processes for:
+#   com.htsu.hsbcpersonalbanking
+#   com.ofss.obdx.and.nbe.com.eg
+#   com.emeint.android.myservices
+#   com.egyptianbanks.instapay
+#   com.paypal.android.p2pmobile
+
+# After verify and adb work is done:
+# Settings - System - Developer options - toggle OFF
+# Optional: uninstall Magisk Manager APK only (root + modules stay)
+
+# Official Shamiko download (if assets zip missing):
+# https://github.com/LSPosed/LSPosed.github.io/releases/download/shamiko-414/Shamiko-v1.2.5-414-release.zip
+# Place at: $HOME/cheetah-dual/shamiko-kit/assets/Shamiko-v1.2.5-414-release.zip

@@ -1,0 +1,21 @@
+# One-line commands for the Mac (Pixel 7 Pro on Android, USB debugging on)
+# No bang characters.
+
+# 0) Unpack once (creates $HOME/cheetah-dual/roothide-fix/)
+mkdir -p $HOME/cheetah-dual && cd $HOME/cheetah-dual && python3 -c "import zipfile; zipfile.ZipFile('$HOME/Downloads/roothide-fix.zip').extractall()"
+
+# 1) Full diagnose + fix
+bash $HOME/cheetah-dual/roothide-fix/fix-all.sh
+
+# 2) Reboot when the script says so
+adb reboot
+
+# 3) After phone is up, verify
+bash $HOME/cheetah-dual/roothide-fix/fix-all.sh verify
+
+# Logs: $HOME/cheetah-dual/roothide-logs/
+
+# MANUAL after verify (required for many Egyptian banks):
+# A) Settings - Apps - Magisk - Uninstall (Manager only; root + modules stay)
+# B) Settings - System - Developer options - toggle OFF (cuts adb; do last)
+# C) Log into each bank/payment app again (data was cleared)

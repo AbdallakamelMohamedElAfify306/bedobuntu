@@ -1,0 +1,29 @@
+# Magisk DenyList package names — tick ALL processes for each app
+# Do NOT add: com.google.android.gms (Play Services) when Enforce DenyList is on
+
+# Banks (Egypt)
+com.ofss.obdx.and.nbe.com.eg
+com.NBEProdToken.MSS
+com.htsu.hsbcpersonalbanking
+
+# Crypto
+com.binance.dev
+com.redotpay
+# Blockchain.com — confirm after install: pm list packages | grep -i block
+piuk.blockchain.android
+
+# Payments / fintech
+com.paypal.android.p2pmobile
+com.payoneer.android
+co.grey.mobile.android
+com.transferwise.android
+com.bmc.android
+# Stripe / Lemon Squeezy usually have no consumer mobile banking app; Dashboard is browser. Add if you install any companion app.
+
+# Telecom wallets (Egypt / e&)
+com.TE.WEWallet
+# Ana Vodafone — confirm: pm list packages | grep -i vodafone
+com.emeint.android.myservices
+# my e& / e& money — confirm after install
+ae.etisalat.myetisalat.b2c
+ae.etisalat.emoney

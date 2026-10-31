@@ -1,0 +1,73 @@
+# Mac commands for the cheetah health kit. One line each. Copy a line exactly.
+
+## A. Connection and upload (once per boot / sleep)
+# A1 bring the USB network up on the Mac (asks for your Mac password)
+sudo ifconfig en6 inet 172.16.42.2 netmask 255.255.255.0 up
+# A2 unzip the kit into your home folder (creates ~/ubuntu-health)
+unzip -oq ~/Downloads/ubuntu-health.zip -d ~
+# A3 upload the kit to the phone
+scp -i "$CHEETAH_SSH_KEY" -r ~/ubuntu-health root@172.16.42.1:/root/
+# A3-fallback if scp fails (no sftp)
+tar -C ~ -cf - ubuntu-health | ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'tar -C /root -xf -'
+# A4 verify the upload byte for byte
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'cd /root/ubuntu-health && sha256sum -c SHA256SUMS'
+
+## Step 0. Wallpaper override removal (idempotent)
+# 0a check only
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/00-step0-undo-wallpaper.sh --check'
+# 0b apply (restarts Phosh only if something was removed)
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/00-step0-undo-wallpaper.sh --apply'
+
+## Phase 1. Read-only health check
+# 1a full check (table on screen, full log on the phone)
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/10-check.sh --quiet'
+# 1b lock screen inspection
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/11-lockscreen-check.sh --quiet'
+# 1c lock screen fixes, dry run (pick the ones you need)
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/12-lockscreen-fix.sh tz clock24 autolock 120 notif-on keypad-fixed'
+# 1d lock screen fixes, apply
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/12-lockscreen-fix.sh --apply tz clock24 autolock 120 notif-on keypad-fixed'
+# 1e copy all logs to your Desktop (optional)
+scp -i "$CHEETAH_SSH_KEY" 'root@172.16.42.1:/root/health/*.log' ~/Desktop/
+
+## Phase 2. Repair
+# 2a network: check
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/20-fix-network.sh --check'
+# 2b network: apply
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/20-fix-network.sh --apply'
+# 2c system repair: check
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/21-repair-system.sh --check'
+# 2d system repair: apply (dpkg, units, zram, journald, fstrim, time)
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/21-repair-system.sh --apply'
+
+## Phase 3. Security
+# 3a audit
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/30-sec-audit.sh --quiet'
+# 3b upgrade plan (simulation only)
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/31-sec-upgrade.sh --check'
+# 3c upgrade for real
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/31-sec-upgrade.sh --apply'
+# 3d unattended security updates
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/32-sec-harden.sh --apply unattended'
+# 3e sysctl hardening
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/32-sec-harden.sh --apply sysctl'
+# 3f firewall check
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/32-sec-harden.sh --apply firewall'
+# 3g ssh key-only (dry run, then apply)
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/32-sec-harden.sh ssh'
+# 3g-apply
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/32-sec-harden.sh --apply ssh'
+# 3h TEST key login works in a NEW terminal window
+ssh -i "$CHEETAH_SSH_KEY" -o PasswordAuthentication=no -o BatchMode=yes root@172.16.42.1 'echo KEY-LOGIN-OK'
+# 3i TEST password login is refused (expected: Permission denied)
+ssh -o PubkeyAuthentication=no -o BatchMode=yes user@172.16.42.1 'echo SHOULD-NOT-PRINT'
+# 3j change the user password (interactive, you type it twice)
+ssh -t -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'passwd user && /usr/local/sbin/cheetah-clear-password-marker'
+
+## Phase 4. Hardware diagnosis (read-only)
+# 4a hardware verdict table
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/40-hw-check.sh --quiet'
+
+## Phase 5. Final verification
+# 5a final table (includes lock screen)
+ssh -i "$CHEETAH_SSH_KEY" root@172.16.42.1 'bash /root/ubuntu-health/50-final-verify.sh'

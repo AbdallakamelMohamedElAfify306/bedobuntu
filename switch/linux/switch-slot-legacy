@@ -1,0 +1,255 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# run-with bash
+# switch-slot: choose which A/B slot the Pixel 7 Pro (cheetah) bootloader boots next. Runs on the phone's Ubuntu, as root.
+#
+# Where the state lives (NOT in the GPT, NOT in misc): the first 128 bytes of the "devinfo" partition (ABL's own record),
+# plus the UFS attribute bBootLunEn (which boot LU the bootloader itself is fetched from). Sources:
+#   Google boot HAL: android.googlesource.com/device/google/gs-common  bootctrl/aidl/{DevInfo.h,BootControl.cpp}
+#   Omarchy Mobile:  device/cheetah/NOTES.md "A/B slot metadata lives in devinfo", packages/omamobile-device-cheetah
+# This script never touches the GPT, boot_a/boot_b, or any partition other than devinfo bytes 0x30-0x37 (via omamobile-bootctl).
+#
+#   switch-slot                     status (read-only, always safe)
+#   switch-slot a|b                 DRY RUN: shows exactly what would change
+#   switch-slot a|b --apply         do it (asks you to type ANDROID before leaving Linux, unless --yes)
+#   switch-slot restore FILE [--apply]   put a saved devinfo header back
+# Options: --reboot (reboot after a successful switch)  --yes  --no-lun (skip the UFS boot-LU sync)  --force
+set -euo pipefail
+
+STATE_DIR=${SS_STATE_DIR:-/var/lib/switch-slot}
+BOOTCTL=${SS_BOOTCTL:-omamobile-bootctl}
+EXPECT_HDR=4445564903000f00           # "DEVI", version 3.15: the only layout omamobile-bootctl writes
+OFF_SLOTS=48                          # 0x30: slot a = 4 bytes, slot b = 4 bytes (retry, flags, 0, 0)
+F_UNBOOT=1; F_SUCC=2; F_ACTIVE=4; F_FBOK=8
+TEST=${SS_TEST_DEVINFO:-}             # test hook: a plain file standing in for the devinfo partition
+
+die()  { echo "switch-slot: ERROR: $*" >&2; exit 1; }
+warn() { echo "switch-slot: warning: $*" >&2; }
+say()  { echo "$*"; }
+
+# ---------------------------------------------------------------- arguments
+CMD=status; APPLY=0; YES=0; REBOOT=0; NOLUN=0; FORCE=0; ARG2=""
+args=()
+for a in "$@"; do
+  case "$a" in
+    --apply) APPLY=1 ;; --yes) YES=1 ;; --reboot) REBOOT=1 ;; --no-lun) NOLUN=1 ;; --force) FORCE=1 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -*) die "unknown option $a" ;;
+    *) args+=("$a") ;;
+  esac
+done
+if [ ${#args[@]} -ge 1 ]; then
+  case "${args[0]}" in
+    a|A|_a) CMD=switch; TARGET=a ;; b|B|_b) CMD=switch; TARGET=b ;;
+    status) CMD=status ;; restore) CMD=restore; ARG2=${args[1]:-} ;;
+    *) die "unknown command ${args[0]} (use: status | a | b | restore FILE)" ;;
+  esac
+fi
+[ "$(id -u)" = 0 ] || [ -n "$TEST" ] || die "run as root (sudo switch-slot ...)"
+
+# ---------------------------------------------------------------- locate things
+current_slot() {
+  if [ -n "${SS_TEST_CURRENT:-}" ]; then echo "$SS_TEST_CURRENT"; return; fi
+  local s
+  s=$(sed -n 's/^androidboot.slot_suffix = "_\([ab]\)"$/\1/p' /proc/bootconfig 2>/dev/null | head -1)
+  [ -n "$s" ] || s=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^androidboot.slot_suffix=_\([ab]\)$/\1/p' | head -1)
+  echo "$s"
+}
+DEV=""; DISK=""
+find_devinfo() {
+  if [ -n "$TEST" ]; then DEV=$TEST; return 0; fi
+  local s
+  for s in /sys/block/sd*/sd*; do
+    if grep -qx PARTNAME=devinfo "$s/uevent" 2>/dev/null; then DEV=/dev/${s##*/}; fi
+  done
+  [ -n "$DEV" ] || die "devinfo partition not found (no sd*N with PARTNAME=devinfo)"
+  [ -b "$DEV" ] || die "$DEV is not a block device"
+  DISK=/dev/$(basename "$(dirname "$(readlink -f "/sys/class/block/${DEV#/dev/}")")")
+}
+raw8() { dd if="$DEV" bs=1 skip=$OFF_SLOTS count=8 status=none | od -An -v -tu1; }
+hdr8() { dd if="$DEV" bs=1 count=8 status=none | od -An -v -tx1 | tr -d ' \n'; }
+declare -a B
+load_state() {
+  [ "$(hdr8)" = "$EXPECT_HDR" ] || die "devinfo header is not DEVI v3.15 ($(hdr8)); refusing (read-only use: omamobile-bootctl dump $DEV)"
+  read -r -a B < <(raw8)
+  [ ${#B[@]} = 8 ] || die "could not read slot bytes"
+}
+sl_idx()    { [ "$1" = a ] && echo 0 || echo 4; }
+sl_retry()  { echo "${B[$(sl_idx "$1")]}"; }
+sl_flags()  { echo "${B[$(( $(sl_idx "$1") + 1 ))]}"; }
+sl_has()    { [ $(( $(sl_flags "$1") & $2 )) -ne 0 ]; }
+yn()        { "$@" && echo yes || echo no; }
+active_slot() { if sl_has b $F_ACTIVE; then echo b; else echo a; fi; }   # HAL rule: b if its active bit is set, else a
+show_slot() {
+  printf '  slot %s: active=%-3s successful=%-3s unbootable=%-3s fastboot-ok=%-3s retry=%s  (raw %s %s)\n' "$1" \
+    "$(yn sl_has "$1" $F_ACTIVE)" "$(yn sl_has "$1" $F_SUCC)" "$(yn sl_has "$1" $F_UNBOOT)" "$(yn sl_has "$1" $F_FBOK)" \
+    "$(sl_retry "$1")" "$(sl_retry "$1")" "$(sl_flags "$1")"
+}
+
+# ---------------------------------------------------------------- UFS boot LU (bBootLunEn): 1 = boot LU A, 2 = boot LU B
+LUN_ATTR=""; BSG=""
+find_lun() {
+  LUN_ATTR=$(find /sys/devices/platform -maxdepth 5 -path '*/attributes/boot_lun_enabled' 2>/dev/null | head -2 || true)
+  [ "$(echo "$LUN_ATTR" | grep -c .)" = 1 ] || LUN_ATTR=""
+  BSG=$(ls /dev/bsg/ufs-bsg* /dev/ufs-bsg* 2>/dev/null | head -1 || true)
+}
+lun_sysfs() { [ -n "$LUN_ATTR" ] || return 1; printf '%d' "$(cat "$LUN_ATTR")"; }
+read -r -d '' BSG_PY <<'EOF_PY' || true
+import ctypes, struct, sys, os
+op, node = sys.argv[1], sys.argv[2]
+val = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+if op == "write" and val not in (1, 2):
+    sys.exit("refusing bBootLunEn=%d" % val)
+READ, WRITE = (0x03, 0x01), (0x04, 0x81)           # (opcode, query_function): READ ATTR std read / WRITE ATTR std write
+opcode, qfunc = READ if op == "read" else WRITE
+req = bytearray(36)                                  # struct ufs_bsg_request: u32 msgcode + utp_upiu_req (12 hdr + 20 query)
+struct.pack_into("<I", req, 0, 0x16)                 # msgcode = UPIU_TRANSACTION_QUERY_REQ
+req[4] = 0x16                                        # header.transaction_code
+req[4 + 5] = qfunc                                   # header.query_function
+req[16] = opcode; req[17] = 0x00                     # query.opcode, query.idn = QUERY_ATTR_IDN_BOOT_LU_EN (0)
+struct.pack_into(">I", req, 24, val)                 # query.value (big endian) at upiu offset 20 -> request offset 24
+rq = (ctypes.c_char * 36).from_buffer(req)
+rp = ctypes.create_string_buffer(40)                 # struct ufs_bsg_reply: int result, u32 rcv_len, utp_upiu_req
+HDR = "<iIIIQQIIIIQIIIIQQIIQIIIIIIIIiiQII"
+assert struct.calcsize(HDR) == 160, struct.calcsize(HDR)
+hdr = ctypes.create_string_buffer(struct.pack(HDR,
+    ord("Q"), 0, 2, 36, ctypes.addressof(rq), 0, 0, 0, 0, 40, ctypes.addressof(rp),
+    0, 0, 0, 0, 0, 0, 10000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), 160)
+libc = ctypes.CDLL(None, use_errno=True)
+fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+last = ""
+for _ in range(3):
+    if libc.ioctl(fd, 0x2285, hdr) < 0:
+        last = "SG_IO: " + os.strerror(ctypes.get_errno()); continue
+    f = struct.unpack(HDR, hdr.raw[:160])
+    driver, transport, device = f[21], f[22], f[23]
+    result, = struct.unpack_from("<i", rp.raw, 0)
+    resp = rp.raw[8 + 6]                              # upiu_rsp header byte 6 = response
+    if driver or transport or device or result or resp:
+        last = "driver=%d transport=%d device=%d result=%d upiu_response=0x%02x" % (driver, transport, device, result, resp)
+        continue
+    print(struct.unpack_from(">I", rp.raw, 8 + 20)[0]); sys.exit(0)   # value: upiu offset 20 of the response
+sys.exit("query failed 3 times: " + last)
+EOF_PY
+bsg() { python3 -c "$BSG_PY" "$@"; }
+if [ -n "${SS_TEST_LUN:-}" ]; then   # test hook: a plain file stands in for the sysfs attribute and the BSG node
+  find_lun() { LUN_ATTR=$SS_TEST_LUN; BSG=/dev/null; }
+  bsg() { if [ "$1" = read ]; then printf '%d\n' "$(cat "$SS_TEST_LUN")"; else printf '0x%08X\n' "$3" > "$SS_TEST_LUN"; echo "$3"; fi; }
+fi
+
+# ---------------------------------------------------------------- status
+cmd_status() {
+  find_devinfo; load_state; find_lun
+  local cur act
+  cur=$(current_slot); act=$(active_slot)
+  say "running slot (androidboot.slot_suffix): ${cur:-UNKNOWN}"
+  say "slot the bootloader will try next:      $act"
+  say "devinfo: $DEV (header DEVI v3.15 ok)"
+  show_slot a; show_slot b
+  sl_has a $F_ACTIVE && sl_has b $F_ACTIVE && warn "both slots have the active bit set (HAL would pick b)"
+  sl_has a $F_ACTIVE || sl_has b $F_ACTIVE || warn "neither slot has the active bit set (HAL would pick a)"
+  if [ -n "$LUN_ATTR" ]; then say "bBootLunEn (UFS boot LU): $(lun_sysfs || echo unreadable)  [1 = boot LU A, 2 = boot LU B]  via $LUN_ATTR"
+  else say "bBootLunEn: sysfs attribute not found"; fi
+  if [ -n "$BSG" ]; then
+    local v; v=$(bsg read "$BSG" 2>&1) && say "UFS BSG read query via $BSG: $v (matches sysfs: $([ "$v" = "$(lun_sysfs 2>/dev/null)" ] && echo yes || echo NO))" \
+      || say "UFS BSG read query FAILED: $v"
+  else say "UFS BSG node: not found (needs CONFIG_SCSI_UFS_BSG)"; fi
+  command -v "$BOOTCTL" >/dev/null || warn "$BOOTCTL not found: switching is unavailable"
+  say "boot-success unit: $(systemctl is-enabled omamobile-boot-success.service 2>&1 | head -1) / $(systemctl is-active omamobile-boot-success.service 2>&1 | head -1)"
+  say "backups: $(ls "$STATE_DIR/backups" 2>/dev/null | wc -l) in $STATE_DIR/backups"
+}
+
+# ---------------------------------------------------------------- write helpers (devinfo is read-only by the storage guard)
+RELOCK=0
+unlock() { [ -n "$TEST" ] && return 0; blockdev --setrw "$DISK"; blockdev --setrw "$DEV"; RELOCK=1; }
+relock() { [ "$RELOCK" = 1 ] || return 0; blockdev --setro "$DEV" 2>/dev/null || true; blockdev --setro "$DISK" 2>/dev/null || true; RELOCK=0; }
+trap relock EXIT
+backup_devinfo() {
+  mkdir -p "$STATE_DIR/backups"
+  BK="$STATE_DIR/backups/devinfo-$(date +%Y%m%d-%H%M%S-%N)-from-$(current_slot).bin"
+  { [ -e "$BK" ]; [ $? -ne 0 ]; } || die "backup name collision: $BK"
+  dd if="$DEV" of="$BK" bs=4096 count=2 status=none
+  [ "$(stat -c %s "$BK")" -ge 128 ] || die "backup too small"
+  sha256sum "$BK" > "$BK.sha256"; sync
+  say "backup of devinfo (first 8 KiB): $BK"
+}
+write_header() {   # write_header FILE : put the first 128 bytes of FILE into devinfo, O_DSYNC, then compare
+  dd if="$1" of="$DEV" bs=128 count=1 conv=notrunc oflag=dsync status=none
+  cmp -n 128 "$1" "$DEV" || die "verify failed after writing header"
+}
+logline() { mkdir -p "$STATE_DIR"; echo "$(date -Is) $*" >> "$STATE_DIR/log"; }
+
+cmd_restore() {
+  [ -f "$ARG2" ] || die "usage: switch-slot restore FILE [--apply]"
+  [ "$(stat -c %s "$ARG2")" -ge 128 ] || die "$ARG2 is smaller than 128 bytes"
+  [ "$(dd if="$ARG2" bs=1 count=8 status=none | od -An -v -tx1 | tr -d ' \n')" = "$EXPECT_HDR" ] || die "$ARG2 is not a DEVI v3.15 header"
+  find_devinfo; load_state
+  say "current:"; show_slot a; show_slot b
+  say "would restore the first 128 bytes of devinfo from $ARG2"
+  [ $APPLY = 1 ] || { say "DRY RUN. Add --apply to write."; exit 0; }
+  backup_devinfo; unlock; write_header "$ARG2"; relock; logline "restore $ARG2"
+  load_state; say "restored:"; show_slot a; show_slot b
+}
+
+# ---------------------------------------------------------------- switch
+cmd_switch() {
+  command -v "$BOOTCTL" >/dev/null || die "$BOOTCTL not found (it ships in the omamobile-device-cheetah package)"
+  find_devinfo; load_state; find_lun
+  local cur act other want_lun lun_now
+  cur=$(current_slot); [ -n "$cur" ] || die "cannot tell which slot is running"
+  [ "$TARGET" = a ] && other=b || other=a
+  act=$(active_slot); want_lun=$([ "$TARGET" = a ] && echo 1 || echo 2)
+  say "running slot: $cur   bootloader will boot next: $act   requested: $TARGET"
+  show_slot a; show_slot b
+  if sl_has "$TARGET" $F_UNBOOT && [ $FORCE = 0 ]; then
+    die "slot $TARGET is marked unbootable. The Google HAL clears that flag on set-active, so --force re-initialises it with a fresh retry budget"
+  fi
+  # the exact byte changes, from the same code the Google HAL port uses (dry run, writes nothing)
+  say "--- devinfo changes (omamobile-bootctl set-active $TARGET, dry run) ---"
+  "$BOOTCTL" set-active "$DEV" "$TARGET" || true
+  if [ "$act" = "$TARGET" ] && [ $FORCE = 0 ]; then say "slot $TARGET is already the active slot; nothing to do (use --force to re-initialise it)"; exit 0; fi
+  # boot LU plan
+  lun_now=""; [ -n "$LUN_ATTR" ] && lun_now=$(lun_sysfs || true)
+  if [ $NOLUN = 1 ]; then say "boot LU: skipped (--no-lun); left at ${lun_now:-unknown}"
+  elif [ "$lun_now" = "$want_lun" ]; then say "boot LU: bBootLunEn already $want_lun, nothing to write"
+  else
+    [ -n "$LUN_ATTR" ] || die "bBootLunEn sysfs attribute not found; re-run with --no-lun to switch devinfo only"
+    [ -n "$BSG" ] || die "no ufs-bsg node, so bBootLunEn ($lun_now -> $want_lun) cannot be written; re-run with --no-lun"
+    local v; v=$(bsg read "$BSG") || die "UFS BSG read query failed ($v); re-run with --no-lun"
+    [ "$v" = "$lun_now" ] || die "BSG reads bBootLunEn=$v but sysfs says $lun_now; refusing to write through a path that disagrees"
+    say "boot LU: bBootLunEn $lun_now -> $want_lun (UFS WRITE ATTRIBUTE via $BSG; read-back verified)"
+  fi
+  if [ "$TARGET" = a ] && [ "$cur" = b ]; then
+    say ""
+    say "WARNING: Android cannot read Linux's userdata. When Android A boots it will normally ask for (or perform) a"
+    say "factory reset of userdata, which ERASES this Ubuntu installation. Coming back needs a Mac reflash (flash-linux.sh)."
+  fi
+  [ $APPLY = 1 ] || { say ""; say "DRY RUN: nothing was written. Re-run with --apply to switch to slot $TARGET."; exit 0; }
+  if [ "$TARGET" = a ] && [ "$cur" = b ] && [ $YES = 0 ]; then
+    printf 'Type ANDROID to switch to Android (slot a): '; read -r ans; [ "$ans" = ANDROID ] || die "cancelled"
+  fi
+  # keep the slot we are leaving a good fallback: marked successful
+  if [ "$cur" = "$other" ] && { sl_has "$cur" $F_SUCC; [ $? -ne 0 ]; }; then
+    if command -v omamobile-boot-success >/dev/null; then say "marking current slot $cur successful first"; omamobile-boot-success || warn "could not mark slot $cur successful"; load_state
+    else warn "slot $cur is not marked successful and omamobile-boot-success is missing"; fi
+  fi
+  backup_devinfo
+  unlock
+  "$BOOTCTL" set-active "$DEV" "$TARGET" --i-understand || die "omamobile-bootctl failed (devinfo unchanged or restorable from $BK)"
+  if [ $NOLUN = 0 ] && { case "$lun_now" in "$want_lun") false;; *) true;; esac; }; then
+    if bsg write "$BSG" "$want_lun" >/dev/null && [ "$(lun_sysfs)" = "$want_lun" ]; then say "bBootLunEn now $(lun_sysfs)"
+    else
+      warn "bBootLunEn write failed; putting devinfo back as it was"
+      write_header "$BK"; relock; logline "FAILED lun write; devinfo restored from $BK"
+      die "switch aborted, devinfo restored (bBootLunEn still ${lun_now}). Use --no-lun to switch devinfo only"
+    fi
+  fi
+  relock
+  load_state
+  [ "$(active_slot)" = "$TARGET" ] && sl_has "$TARGET" $F_ACTIVE && { sl_has "$other" $F_ACTIVE; [ $? -ne 0 ]; } || die "verification failed; restore with: switch-slot restore $BK --apply"
+  logline "switched $cur -> $TARGET (lun ${lun_now:-?}->${want_lun}) backup $BK"
+  say ""; say "DONE. After state:"; show_slot a; show_slot b
+  say "The phone will boot slot $TARGET on the next reboot. To undo before rebooting: switch-slot restore $BK --apply"
+  if [ $REBOOT = 1 ]; then say "rebooting in 3 s"; sleep 3; sync; systemctl reboot || reboot; fi
+}
+
+case "$CMD" in status) cmd_status ;; switch) cmd_switch ;; restore) cmd_restore ;; esac

@@ -1,0 +1,14 @@
+Cheetah Dual (Ubuntu + Phosh for Pixel 7 Pro)
+=============================================
+
+Primary author
+  Abdalla Kamel Mohamed El Afify <abdallahkamel306@gmail.com>
+
+Upstream projects this work derives from or builds upon
+  Omarchy Mobile (derekross/omarchy-mobile) — MIT License
+  Linux kernel (omamobile branch) — GPL-2.0-only
+  Phosh — GPL-3.0-or-later
+  Magisk — GPL-3.0-or-later
+  Android Open Source Project (bootctrl / DevInfo references) — Apache-2.0
+
+See NOTICE for full attribution and LICENSE / LICENSES/ for license texts.

@@ -1,0 +1,2 @@
+# Installed by omamobile-reboot-android: the phone's user may run exactly this one command as root, with exactly this one argument, no password.
+user ALL=(root) NOPASSWD: /usr/local/sbin/omamobile-reboot-android apply

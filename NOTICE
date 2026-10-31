@@ -1,0 +1,60 @@
+Cheetah Dual — notices for third-party and upstream material
+============================================================
+
+This repository contains original scripts, Android app source, Phosh lock-screen
+CSS overrides, shared-partition tooling, and documentation authored by Abdalla Kamel Mohamed
+El Afify, plus small derived adaptations of Omarchy Mobile build and
+install helpers.
+
+The project idea, the overall design and the combination of Ubuntu + Phosh on
+the Pixel 7 Pro with Android side by side, two-way switch icons and a shared
+partition are the original work of Abdalla Kamel Mohamed El Afify.
+
+XDA Developers community (https://xdaforums.com/)
+  Used as: tools and guides for Pixel 7 Pro flashing, A/B slots, AVB and boot
+  images. No XDA files are redistributed here.
+
+Omarchy Mobile (https://github.com/derekross/omarchy-mobile)
+  License: MIT (see LICENSES/MIT-omarchy-mobile.txt)
+  Used as: upstream pipeline reference for Pixel 7 Pro (cheetah) mainline kernel
+  bring-up, initramfs layout, device package patterns, and slot-B flash allowlist.
+  Files under boot/scripts/extract-vendor-firmware and ubuntu/build/alpine-fetch.py
+  are taken from Omarchy Mobile tools/ with SPDX MIT notice retained where present.
+  This project is NOT Omarchy Mobile. Omarchy Mobile ships Arch Linux ARM + Hyprland.
+  Cheetah Dual ships Ubuntu 24.04 (noble) + Phosh.
+
+Linux kernel
+  License: GPL-2.0-only
+  Kernel sources are NOT vendored here. Build against the omamobile kernel tree
+  from Omarchy Mobile. Any kernel-derived patches you add must remain GPL-2.0.
+
+Phosh
+  License: GPL-3.0-or-later
+  Not vendored. Lock-screen CSS overrides under lockscreen/ are original.
+
+Magisk (https://github.com/topjohnwu/Magisk) by topjohnwu, GPL-3.0
+  Used as: rooting the Android side.
+  License: GPL-3.0-or-later
+  Not vendored. Helper scripts under android/ reference Magisk by name/URL only.
+  Do not commit Magisk APKs or third-party Zygisk modules in this tree.
+
+Android Open Source Project (device/google/gs-common bootctrl, DevInfo)
+  License: Apache-2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+  Reference headers consulted while writing switch helpers. Full Apache-2.0 text
+  is intentionally not inlined here (see the URL). SPDX: Apache-2.0
+
+Google firmware / factory images / Mali firmware blob
+  Google proprietary firmware is NOT redistributable and is NOT included.
+  mali_csffw.bin is likewise NOT shipped in this source tree; obtain redistributable
+  firmware from linux-firmware where permitted, or from your own factory image via
+  boot/scripts/provision-firmware.sh.
+
+Trademarks
+  "Ubuntu" is a trademark of Canonical Ltd. This project is not affiliated with,
+  endorsed by, or sponsored by Canonical. "Pixel" and "Android" are trademarks of
+  Google LLC. Use descriptive wording such as "Ubuntu-based" where needed.
+
+Secrets policy
+  Never commit: private SSH keys, keystores, *.img boot images, GPT dumps, device
+  serials, IMEI, Wi-Fi PSKs, account tokens, or partition backups.
+

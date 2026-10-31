@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=إعادة التشغيل إلى أندرويد
+GenericName=Reboot to Android
+Comment=Reboot the phone into Android (slot A) · إعادة تشغيل الهاتف إلى أندرويد
+Keywords=android;reboot;restart;slot;switch;أندرويد;إعادة;
+Exec=/usr/local/bin/omamobile-reboot-android-gui
+Icon=omamobile-reboot-android
+Terminal=false
+StartupNotify=false
+Categories=System;

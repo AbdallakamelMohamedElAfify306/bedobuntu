@@ -1,0 +1,20 @@
+# User-facing single-line commands. Outer quotes single. No bang characters.
+
+# 1) One-time setup (phone on Android, USB debugging on, Magisk grants Shell)
+bash $HOME/cheetah-dual/root-toggle/mac/setup.sh
+
+# 2) Status
+bash $HOME/cheetah-dual/root-toggle/mac/status.sh
+
+# 3) Hard unroot from Mac (same as وضع البنك icon)
+bash $HOME/cheetah-dual/root-toggle/mac/unroot.sh
+
+# 4) Re-root from Mac after Bank Mode (REQUIRED path after unroot+reboot)
+bash $HOME/cheetah-dual/root-toggle/mac/reroot.sh
+
+# 5) Soft hide / show (optional, fully on-phone, weak)
+adb shell 'su -c "sh /data/adb/roottoggle/soft-hide.sh"'
+adb shell 'su -c "sh /data/adb/roottoggle/soft-show.sh"'
+
+# 6) If setup was done but APK needs reinstall only
+adb install -r $HOME/cheetah-dual/root-toggle/android/RootToggle.apk

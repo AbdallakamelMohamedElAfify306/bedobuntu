@@ -1,0 +1,38 @@
+{
+  "title": "bedobuntu: Cheetah Dual (Ubuntu + Phosh for Pixel 7 Pro)",
+  "upload_type": "software",
+  "description": "Scripts and documentation for running Ubuntu 24.04 with Phosh on a Google Pixel 7 Pro (cheetah) alongside Android, with two-way switch helpers and a shared ext4 partition. Idea, design and integration by Abdalla Kamel Mohamed El Afify. To our knowledge, the first public Ubuntu + Phosh port for cheetah with this dual-boot and switch design. Built with the help of Omarchy Mobile, XDA Developers tools and Magisk; dual-boot-on-slots and slot-switch ideas existed before. Not affiliated with Canonical or Google.",
+  "creators": [
+    {
+      "name": "El Afify, Abdalla Kamel Mohamed",
+      "affiliation": "",
+      "orcid": "0009-0009-0417-1070"
+    }
+  ],
+  "license": "GPL-3.0-or-later",
+  "keywords": [
+    "pixel-7-pro",
+    "cheetah",
+    "ubuntu",
+    "phosh",
+    "dual-boot",
+    "android",
+    "mainline-linux"
+  ],
+  "related_identifiers": [
+    {
+      "scheme": "url",
+      "identifier": "https://github.com/AbdallakamelMohamedElAfify306/bedobuntu",
+      "relation": "isSupplementTo",
+      "resource_type": "software"
+    },
+    {
+      "scheme": "url",
+      "identifier": "https://github.com/derekross/omarchy-mobile",
+      "relation": "isDerivedFrom",
+      "resource_type": "software"
+    }
+  ],
+  "version": "0.1.0",
+  "access_right": "open"
+}

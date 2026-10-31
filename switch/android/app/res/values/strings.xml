@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">التبديل إلى Ubuntu</string>
+    <string name="confirm_title">التبديل إلى Ubuntu؟</string>
+    <string name="confirm_msg">التليفون هيعمل ريستارت دلوقتي ويفتح على Ubuntu. احفظ أي شغل مفتوح في الأندرويد الأول.\n\nمفيش حاجة هتتمسح.</string>
+    <string name="btn_go">تبديل وإعادة تشغيل</string>
+    <string name="btn_cancel">إلغاء</string>
+    <string name="btn_test">اختبار فقط</string>
+    <string name="working">جاري التنفيذ…</string>
+    <string name="result_title">النتيجة</string>
+    <string name="btn_ok">تمام</string>
+    <string name="denied_hint">لو الرسالة بتقول إن الروت مش متاح: افتح تطبيق Magisk ثم Superuser وفعّل \"التبديل إلى Ubuntu\"، وبعدها جرّب تاني.</string>
+</resources>

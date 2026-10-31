@@ -1,0 +1,55 @@
+# Images, firmware, dumps — never publish
+*.img
+*.simg
+*.xz
+*.bin
+*.dtb
+*.dtbo
+*.cpio
+*.cpio.*
+*.deb
+*.apk
+*.idsig
+*.so
+*.a
+*.o
+*.ko
+*.pyc
+__pycache__/
+
+# Secrets and signing material
+*.key
+*.pem
+*.keystore
+*.jks
+debug_ssh/
+id_ed25519
+id_ed25519.pub
+authorized_keys
+custom.pif.json
+custom.pif.prop
+
+# Backups and local trees
+backup/
+backups/
+reference/
+*.tar
+*.tar.gz
+*.zip
+gpt*
+*.raw
+devinfo*.bin
+
+# Build outputs
+out/
+out-ubuntu/
+build/kernel-out/
+build-ubuntu/work/
+mesa-build/
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*~

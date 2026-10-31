@@ -1,0 +1,540 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# run-with python3
+def __ne(a, b):
+    return not (a == b)
+# omamobile-reboot-android: root helper. Makes Android (slot a) the slot the Pixel 7 Pro bootloader boots next, then reboots.
+# Runs on the phone's Ubuntu (slot b), as root. Self-contained: needs only python3 (no omamobile-bootctl, no sgdisk).
+#
+#   omamobile-reboot-android status            read-only report (safe any time)
+#   omamobile-reboot-android apply             back up devinfo, switch to slot a, verify by read-back, sync, reboot
+#   omamobile-reboot-android restore FILE      put a saved devinfo slot area back (no reboot)
+#
+# What it changes, and nothing else:
+#   * devinfo partition, bytes 0x30..0x37 (slot a record, slot b record). Same mutation as Google's boot HAL setActiveBootSlot(a):
+#       slot a: retry=3, unbootable=0, successful=0, fastboot_ok=0, active=1   slot b: active=0 (+ unbootable=0, successful=1: kept a good fallback)
+#   * UFS attribute bBootLunEn 2 -> 1 (which bootloader copy runs), through /dev/bsg/ufs-bsg0, exactly what the HAL does.
+# devinfo is read-only under the initramfs storage guard: only that one partition is unlocked (BLKROSET), only for the write, then locked again.
+# Facts: devinfo header "DEVI" v3.15, slot a bytes at 0x30, slot b at 0x34 = (retry, flags, 0, 0); flags bit0 unbootable, bit1 successful,
+# bit2 active, bit3 fastboot_ok. Active slot = b if b.active else a (HAL rule). No checksum in the record.
+import argparse, ctypes, fcntl, glob, hashlib, mmap, os, signal, stat, struct, subprocess, sys, time
+
+HDR = bytes.fromhex("4445564903000f00")       # "DEVI", 3.15
+OFF = {"a": 0x30, "b": 0x34}
+UNB, SUCC, ACT, FBOK = 1, 2, 4, 8
+MAX_RETRY = 3
+BLKROSET, BLKROGET, BLKFLSBUF = 0x125D, 0x125E, 0x1261
+BLK = 4096
+RUN = "/run/omamobile-reboot-android"
+BACKUPS = "/root/devinfo-backups"
+
+
+os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+class Fail(Exception):
+    pass
+
+
+def say(*a):
+    print(*a, flush=True)
+
+
+# ------------------------------------------------------------------ small helpers
+def read_text(p, default=""):
+    try:
+        with open(p) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def current_slot(forced=None):
+    if forced:
+        return forced
+    for line in read_text("/proc/bootconfig").splitlines():
+        line = line.replace(" ", "")
+        if line.startswith("androidboot.slot_suffix="):
+            return line.split("=", 1)[1].strip('"').lstrip("_")
+    for w in read_text("/proc/cmdline").split():
+        if w.startswith("androidboot.slot_suffix="):
+            return w.split("=", 1)[1].lstrip("_")
+    return ""
+
+
+def partname(sys_dir):
+    for l in read_text(sys_dir + "/uevent").splitlines():
+        if l.startswith("PARTNAME="):
+            return l[9:]
+    return ""
+
+
+def find_partition(name):
+    """(sysfs dir, disk sysfs dir) of the one partition called `name` on an sd* disk; Fail unless exactly one."""
+    hits = [p for p in glob.glob("/sys/block/sd*/sd*") if partname(p) == name]
+    if __ne(len(hits) , 1):
+        raise Fail("expected exactly one sd* partition named %s, found %d" % (name, len(hits)))
+    return hits[0], os.path.dirname(hits[0])
+
+
+def node_for(sys_dir):
+    """A usable block device node for a sysfs block dir. /dev/sda itself is removed by the storage guard each boot; recreate privately."""
+    maj, mnr = [int(x) for x in read_text(sys_dir + "/dev").split(":")]
+    want = os.makedev(maj, mnr)
+    dev = "/dev/" + os.path.basename(sys_dir)
+    try:
+        st = os.stat(dev)
+        if stat.S_ISBLK(st.st_mode) and st.st_rdev == want:
+            return dev, False
+    except OSError:
+        pass
+    os.makedirs(RUN, mode=0o700, exist_ok=True)
+    p = "%s/%s" % (RUN, os.path.basename(sys_dir))
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
+    os.mknod(p, 0o600 | stat.S_IFBLK, want)
+    return p, True
+
+
+def ro_flag(sys_dir):
+    return read_text(sys_dir + "/ro", "?")
+
+
+def blkroset(node, ro):
+    fd = os.open(node, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        fcntl.ioctl(fd, BLKROSET, struct.pack("i", 1 if ro else 0))
+    finally:
+        os.close(fd)
+
+
+def flush_cache(node):
+    fd = os.open(node, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        fcntl.ioctl(fd, BLKFLSBUF, 0)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def read_dev(node, length, offset=0):
+    """Read from the media, bypassing the page cache (O_DIRECT, 4 KiB aligned)."""
+    n = ((offset + length + BLK - 1) // BLK) * BLK
+    start = (offset // BLK) * BLK
+    n -= start
+    buf = mmap.mmap(-1, n)
+    fd = os.open(node, os.O_RDONLY | os.O_DIRECT | os.O_CLOEXEC)
+    try:
+        got = os.preadv(fd, [buf], start)
+    finally:
+        os.close(fd)
+    if got < offset - start + length:
+        raise Fail("short read from %s (%d bytes)" % (node, got))
+    return bytes(buf[offset - start: offset - start + length])
+
+
+def pwrite_sync(node, data, offset):
+    fd = os.open(node, os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
+    try:
+        if __ne(os.pwrite(fd, data, offset) , len(data)):
+            raise Fail("short write to %s" % node)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+# ------------------------------------------------------------------ devinfo record
+class Rec:
+    def __init__(self, raw):
+        if len(raw) < 128 or __ne(raw[:8] , HDR):
+            raise Fail("devinfo header is %s, not DEVI v3.15 (%s); refusing" % (raw[:8].hex(), HDR.hex()))
+        self.b = bytearray(raw[:128])
+
+    def retry(self, s): return self.b[OFF[s]]
+    def flags(self, s): return self.b[OFF[s] + 1]
+    def has(self, s, bit): return bool(self.flags(s) & bit)
+    def active(self): return "b" if self.has("b", ACT) else "a"
+
+    def slotarea(self): return bytes(self.b[0x30:0x38])
+
+    def show(self, s):
+        return "slot %s: retry=%d flags=0x%02x active=%s successful=%s unbootable=%s fastboot_ok=%s" % (
+            s, self.retry(s), self.flags(s), *["yes" if self.has(s, x) else "no" for x in (ACT, SUCC, UNB, FBOK)])
+
+    def to_a(self):
+        """New record for 'boot slot a next'. Returns a modified copy."""
+        n = Rec(bytes(self.b))
+        n.b[OFF["b"] + 1] &= ~ACT & 0xFF                  # HAL: inactive.active = 0
+        n.b[OFF["a"]] = MAX_RETRY                         # HAL DevInfoInitSlot(a)
+        n.b[OFF["a"] + 1] = (n.b[OFF["a"] + 1] & ~(UNB | SUCC | FBOK) & 0xFF) | ACT
+        n.b[OFF["b"] + 1] = (n.b[OFF["b"] + 1] & ~UNB & 0xFF) | SUCC     # we are running from b: it is good; keep it a bootable fallback
+        if n.b[OFF["b"]] == 0:
+            n.b[OFF["b"]] = MAX_RETRY
+        return n
+
+
+# ------------------------------------------------------------------ UFS bBootLunEn
+BSG_PY = r'''
+import ctypes, struct, sys, os
+op, node = sys.argv[1], sys.argv[2]
+val = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+if op == "write" and val not in (1, 2):
+    sys.exit("refusing bBootLunEn=%d" % val)
+READ, WRITE = (0x03, 0x01), (0x04, 0x81)
+opcode, qfunc = READ if op == "read" else WRITE
+req = bytearray(36)
+struct.pack_into("<I", req, 0, 0x16)
+req[4] = 0x16
+req[4 + 5] = qfunc
+req[16] = opcode; req[17] = 0x00
+struct.pack_into(">I", req, 24, val)
+rq = (ctypes.c_char * 36).from_buffer(req)
+rp = ctypes.create_string_buffer(40)
+HDR = "<iIIIQQIIIIQIIIIQQIIQIIIIIIIIiiQII"
+assert struct.calcsize(HDR) == 160, struct.calcsize(HDR)
+hdr = ctypes.create_string_buffer(struct.pack(HDR,
+    ord("Q"), 0, 2, 36, ctypes.addressof(rq), 0, 0, 0, 0, 40, ctypes.addressof(rp),
+    0, 0, 0, 0, 0, 0, 10000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), 160)
+libc = ctypes.CDLL(None, use_errno=True)
+fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+last = ""
+for _ in range(3):
+    if libc.ioctl(fd, 0x2285, hdr) < 0:
+        last = "SG_IO: " + os.strerror(ctypes.get_errno()); continue
+    f = struct.unpack(HDR, hdr.raw[:160])
+    driver, transport, device = f[21], f[22], f[23]
+    result, = struct.unpack_from("<i", rp.raw, 0)
+    resp = rp.raw[8 + 6]
+    if driver or transport or device or result or resp:
+        last = "driver=%d transport=%d device=%d result=%d upiu_response=0x%02x" % (driver, transport, device, result, resp)
+        continue
+    print(struct.unpack_from(">I", rp.raw, 8 + 20)[0]); sys.exit(0)
+sys.exit("query failed 3 times: " + last)
+'''
+
+
+class Lun:
+    """bBootLunEn: 1 = boot LU A, 2 = boot LU B. Read via sysfs, read/write via BSG raw UPIU (mainline sysfs attribute is read-only)."""
+
+    def __init__(self, test_file=None):
+        self.test = test_file
+        self.attr = None
+        self.bsg = None
+        if test_file:
+            self.attr, self.bsg = test_file, "TEST"
+            return
+        hits = [p for p in glob.glob("/sys/devices/platform/*/attributes/boot_lun_enabled")] + \
+               [p for p in glob.glob("/sys/devices/platform/*/*/attributes/boot_lun_enabled")] + \
+               [p for p in glob.glob("/sys/devices/platform/*/*/*/attributes/boot_lun_enabled")]
+        hits = sorted(set(hits))
+        if len(hits) == 1:
+            self.attr = hits[0]
+        for pat in ("/dev/bsg/ufs-bsg*", "/dev/ufs-bsg*"):
+            g = sorted(glob.glob(pat))
+            if g:
+                self.bsg = g[0]
+                break
+        if not self.bsg:                                   # device node may be missing (no udev rule): make a private one from sysfs
+            for d in sorted(glob.glob("/sys/class/bsg/ufs-bsg*")):
+                try:
+                    maj, mnr = [int(x) for x in read_text(d + "/dev").split(":")]
+                    os.makedirs(RUN, mode=0o700, exist_ok=True)
+                    p = RUN + "/" + os.path.basename(d)
+                    if not os.path.exists(p):
+                        os.mknod(p, 0o600 | stat.S_IFCHR, os.makedev(maj, mnr))
+                    self.bsg = p
+                    break
+                except (OSError, ValueError):
+                    pass
+
+    def sysfs(self):
+        if not self.attr:
+            return None
+        try:
+            return int(read_text(self.attr), 0)
+        except ValueError:
+            return None
+
+    def q(self, op, val=0):
+        if self.test:
+            if op == "read":
+                return int(read_text(self.test), 0)
+            with open(self.test, "w") as f:
+                f.write("0x%08X\n" % val)
+            return val
+        if not self.bsg:
+            raise Fail("no UFS BSG node (/dev/bsg/ufs-bsg0): bBootLunEn cannot be read/written")
+        r = subprocess.run([sys.executable, "-c", BSG_PY, op, self.bsg] + ([str(val)] if op == "write" else []),
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode:
+            raise Fail("UFS BSG %s failed: %s" % (op, (r.stderr or r.stdout).strip().splitlines()[-1:] or r.returncode))
+        return int(r.stdout.split()[0])
+
+
+# ------------------------------------------------------------------ the work
+class Ctx:
+    pass
+
+
+def locate(args):
+    c = Ctx()
+    c.cur = current_slot(args.current)
+    if args.test_devinfo:
+        c.node, c.sysdir, c.disk, c.tmpnodes = args.test_devinfo, None, None, []
+        c.size = os.path.getsize(args.test_devinfo)
+        return c
+    c.sysdir, c.disk = find_partition("devinfo")
+    c.tmpnodes = []
+    c.node, tmp = node_for(c.sysdir)
+    if tmp:
+        c.tmpnodes.append(c.node)
+    c.size = int(read_text(c.sysdir + "/size", "0")) * 512
+    return c
+
+
+def load(c):
+    if c.sysdir:
+        flush_cache(c.node)
+        raw = read_dev(c.node, BLK)
+    else:
+        with open(c.node, "rb") as f:
+            raw = f.read(BLK)
+    return Rec(raw), raw
+
+
+def report(c, args):
+    rec, _ = load(c)
+    say("running slot (androidboot.slot_suffix): %s" % (c.cur or "UNKNOWN"))
+    say("devinfo partition: %s (%s, %d bytes), header DEVI v3.15 ok" % (os.path.basename(c.sysdir) if c.sysdir else "TEST FILE", c.node, c.size))
+    say("slot the bootloader boots next: %s" % rec.active())
+    say("  " + rec.show("a"))
+    say("  " + rec.show("b"))
+    if c.sysdir:
+        say("guard state: devinfo ro=%s, disk %s ro=%s (1 = locked; apply unlocks only devinfo, only while writing)" %
+            (ro_flag(c.sysdir), os.path.basename(c.disk), ro_flag(c.disk)))
+    lun = Lun(args.test_lun)
+    sv = lun.sysfs()
+    say("bBootLunEn via sysfs: %s   [1 = boot LU A (slot a), 2 = boot LU B (slot b)]  attr=%s" % (sv, lun.attr))
+    say("UFS BSG node: %s" % lun.bsg)
+    bv = None
+    if lun.bsg:
+        try:
+            bv = lun.q("read")
+            say("bBootLunEn via BSG read query: %s  (matches sysfs: %s)" % (bv, "yes" if bv == sv else "NO"))
+        except Fail as e:
+            say("bBootLunEn BSG read FAILED: %s" % e)
+    return rec, lun, sv, bv
+
+
+def cmd_status(c, args):
+    report(c, args)
+    if __ne(c.cur , "b"):
+        say("WARNING: this is not slot b (apply would refuse)")
+    wants = "ready: apply would make slot a active (retry 3), keep slot b bootable+successful, bBootLunEn -> 1"
+    say(wants)
+    for w in dry_plan(c, args):
+        say("  " + w)
+
+
+def dry_plan(c, args):
+    rec, _ = load(c)
+    new = rec.to_a()
+    out = []
+    for i in range(0x30, 0x38):
+        if __ne(rec.b[i] , new.b[i]):
+            out.append("devinfo[0x%02x]: 0x%02x -> 0x%02x" % (i, rec.b[i], new.b[i]))
+    if not out:
+        out.append("devinfo: no byte changes needed")
+    return out
+
+
+def backup(c, rec_raw):
+    d = c.args.backup_dir or BACKUPS
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    path = "%s/devinfo-%s-from-%s.bin" % (d, time.strftime("%Y%m%d-%H%M%S"), c.cur or "x")
+    if os.path.exists(path):
+        raise Fail("backup name collision " + path)
+    nbytes = min(max(c.size, BLK), 2 * BLK) if c.sysdir else min(c.size, 2 * BLK)
+    data = read_dev(c.node, nbytes) if c.sysdir else open(c.node, "rb").read(nbytes)
+    if __ne(data[:BLK] , rec_raw):
+        raise Fail("devinfo changed while we were reading it; try again")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    with open(path + ".sha256", "w") as f:
+        f.write("%s  %s\n" % (hashlib.sha256(data).hexdigest(), os.path.basename(path)))
+    if __ne(open(path, "rb").read() , data):
+        raise Fail("backup read-back mismatch")
+    dfd = os.open(d, os.O_RDONLY)
+    os.fsync(dfd)
+    os.close(dfd)
+    say("backup of devinfo (%d bytes): %s  sha256 %s" % (len(data), path, hashlib.sha256(data).hexdigest()[:16]))
+    return path
+
+
+def write_slotarea(c, old_raw, area, what):
+    """Write 8 bytes at 0x30 with the partition unlocked; verify from the media; relock. old_raw: 4 KiB block we expect to find."""
+    if not c.sysdir:
+        with open(c.node, "r+b") as f:
+            f.seek(0x30); f.write(area); f.flush(); os.fsync(f.fileno())
+        return
+    was_part, was_disk = ro_flag(c.sysdir), ro_flag(c.disk)
+    disk_node = None
+    try:
+        if was_disk == "1":                                # the guard keeps sda writable; handle the other case anyway
+            disk_node, tmp = node_for(c.disk)
+            if tmp: c.tmpnodes.append(disk_node)
+            blkroset(disk_node, False)
+        blkroset(c.node, False)
+        if __ne(ro_flag(c.sysdir) , "0"):
+            raise Fail("could not unlock devinfo partition (ro=%s)" % ro_flag(c.sysdir))
+        pwrite_sync(c.node, area, 0x30)
+    finally:
+        try:
+            blkroset(c.node, __ne(was_part , "0"))
+            if disk_node and was_disk == "1":
+                blkroset(disk_node, True)
+        except OSError as e:
+            say("warning: could not re-lock: %s" % e)
+    flush_cache(c.node)
+    got = read_dev(c.node, BLK)
+    want = old_raw[:0x30] + area + old_raw[0x38:]
+    if __ne(got , want):
+        raise Fail("read-back after writing %s does not match what was written" % what)
+
+
+def cmd_apply(c, args):
+    if c.cur and __ne(c.cur , "b"):
+        raise Fail("running slot is %s, not b: this helper is for Ubuntu on slot b" % c.cur)
+    report(c, args)
+    rec, raw = load(c)
+    lun = Lun(args.test_lun)
+    sv = lun.sysfs()
+    old_area = rec.slotarea()
+    new = rec.to_a()
+    cur_lun = None
+    # --- plan the boot LU first, so the common failure happens before anything is written
+    if __ne(args.lun , "skip"):
+        try:
+            bv = lun.q("read")
+        except Fail as e:
+            raise Fail("%s\nNothing was changed. Fix that, or set LUN=skip in /etc/omamobile-reboot-android.conf (devinfo-only switch)." % e)
+        if sv is not None and __ne(bv , sv):
+            raise Fail("BSG reads bBootLunEn=%s but sysfs says %s: refusing to write through a path that disagrees. Nothing was changed." % (bv, sv))
+        if bv not in (1, 2):
+            raise Fail("bBootLunEn=%s is neither 1 nor 2; refusing. Nothing was changed." % bv)
+        cur_lun = bv
+    say("plan: " + "; ".join(dry_plan(c, args)) + "; bBootLunEn %s -> %s" % (cur_lun if cur_lun else "skipped", 1))
+    already = (rec.active() == "a" and not rec.has("b", ACT) and rec.slotarea() == new.slotarea() and cur_lun in (None, 1))
+    if already:
+        say("devinfo already selects slot a with bBootLunEn=1; nothing to write")
+    else:
+        bk = backup(c, raw)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN); signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.signal(signal.SIGINT, signal.SIG_IGN)
+        lun_changed = False
+        try:
+            # 1) boot LU first: if anything after it fails, the phone still boots Ubuntu (slot b active in devinfo)
+            if cur_lun is not None and __ne(cur_lun , 1):
+                lun.q("write", 1)
+                lun_changed = True
+                if __ne(lun.q("read") , 1) or (lun.sysfs() not in (None, 1)):
+                    raise Fail("bBootLunEn did not read back as 1")
+                say("bBootLunEn %s -> 1 (read back ok)" % cur_lun)
+            # 2) devinfo
+            write_slotarea(c, raw, new.slotarea(), "devinfo")
+            say("devinfo slot area written and verified from the media")
+        except Exception as e:
+            say("FAILED: %s; rolling back" % e)
+            ok = True
+            try:
+                if __ne(rec.slotarea() , load(c)[0].slotarea()):
+                    write_slotarea(c, raw, old_area, "rollback")
+            except Exception as e2:
+                ok = False
+                say("rollback of devinfo FAILED: %s (backup: %s; restore: omamobile-reboot-android restore %s)" % (e2, bk, bk))
+            if lun_changed:
+                try:
+                    lun.q("write", cur_lun)
+                    say("bBootLunEn restored to %s" % cur_lun)
+                except Exception as e3:
+                    ok = False
+                    say("bBootLunEn restore FAILED: %s (it is now 1; devinfo still says slot b, so the phone still boots Ubuntu)" % e3)
+            raise Fail("switch aborted%s: %s" % (", state restored" if ok else " (see above)", e))
+        # final independent check
+        rec2, _ = load(c)
+        if not (rec2.active() == "a" and rec2.has("a", ACT) and not rec2.has("b", ACT) and not rec2.has("a", UNB) and not rec2.has("b", UNB)):
+            raise Fail("final verification failed; restore with: omamobile-reboot-android restore %s" % bk)
+        if cur_lun is not None and __ne(lun.q("read") , 1):
+            raise Fail("final verification: bBootLunEn is not 1; restore with: omamobile-reboot-android restore %s" % bk)
+        say("verified: next boot = slot a;  " + rec2.show("a"))
+        say("                          " + rec2.show("b"))
+        with open((args.backup_dir or BACKUPS) + "/log", "a") as f:
+            f.write("%s switched b->a backup=%s lun=%s->1\n" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), bk, cur_lun))
+    if args.no_reboot:
+        say("--no-reboot: not rebooting")
+        return
+    say("rebooting into Android in 2 s")
+    subprocess.run(["sync"])
+    time.sleep(2)
+    if __ne(subprocess.run(["systemctl", "reboot"]).returncode , 0):
+        subprocess.run(["systemctl", "reboot", "-f"])
+
+
+def cmd_restore(c, args):
+    p = args.file
+    data = open(p, "rb").read()
+    if len(data) < 128 or __ne(data[:8] , HDR):
+        raise Fail("%s is not a DEVI v3.15 devinfo backup" % p)
+    rec, raw = load(c)
+    bk = backup(c, raw)
+    write_slotarea(c, raw, data[0x30:0x38], "restore")
+    rec2, _ = load(c)
+    say("restored slot area from %s" % p); say("  " + rec2.show("a")); say("  " + rec2.show("b"))
+    say("note: bBootLunEn is not touched by restore; it is %s" % Lun(args.test_lun).sysfs())
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1] if __doc__ else "")
+    ap.add_argument("cmd", choices=["status", "apply", "restore"])
+    ap.add_argument("file", nargs="?")
+    ap.add_argument("--no-reboot", action="store_true")
+    ap.add_argument("--lun", choices=["auto", "skip"], default=None)
+    ap.add_argument("--current"); ap.add_argument("--test-devinfo"); ap.add_argument("--test-lun"); ap.add_argument("--backup-dir")
+    args = ap.parse_args()
+    if args.lun is None:
+        args.lun = "auto"
+        for l in read_text("/etc/omamobile-reboot-android.conf").splitlines():
+            if l.strip() == "LUN=skip":
+                args.lun = "skip"
+    if __ne(os.geteuid() , 0) and not args.test_devinfo:
+        say("run as root"); return 2
+    os.umask(0o077)
+    lockf = open(("/tmp" if args.test_devinfo else "/run") + "/omamobile-reboot-android.lock", "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        say("another instance is running"); return 3
+    c = None
+    try:
+        c = locate(args)
+        c.args = args
+        {"status": cmd_status, "apply": cmd_apply, "restore": cmd_restore}[args.cmd](c, args)
+        return 0
+    except Fail as e:
+        say("ERROR: %s" % e)
+        return 1
+    except Exception as e:
+        say("ERROR: unexpected: %r" % e)
+        return 1
+    finally:
+        for n in (c.tmpnodes if c else []):
+            try: os.unlink(n)
+            except OSError: pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

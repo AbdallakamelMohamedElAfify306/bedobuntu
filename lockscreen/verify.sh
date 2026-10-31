@@ -1,0 +1,2 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+G=/home/user/.config/gtk-3.0/gtk.css; cat $G; echo ----; echo home-rules=$(grep -c "^phosh-home {" $G) lock-rules=$(grep -c "^phosh-lockscreen {" $G) owner=$(stat -c %U $G) mode=$(stat -c %a $G); echo phosh-pid=$(pgrep -ox phosh) up-seconds=$(ps -o etimes= -p $(pgrep -ox phosh)); systemctl is-active pixel-phosh; runuser -u user -- test -r /usr/share/backgrounds/my-wall.jpg && echo IMG-READABLE; echo css-errors-this-boot=$(journalctl -b --no-pager 2>/dev/null | grep -ci "theme parsing error")

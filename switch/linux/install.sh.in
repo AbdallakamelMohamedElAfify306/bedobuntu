@@ -1,0 +1,34 @@
+# Run with: bash install.sh.in
+# Installs the "Reboot to Android" launcher on the phone's Ubuntu. Run as root. Preflight first (no writes), then install.
+set -eu
+die() { echo "INSTALL ABORTED: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "run as root"
+U=user
+getent passwd "$U" >/dev/null || die "no user '$U'"
+command -v python3 >/dev/null || die "python3 missing"
+command -v sudo >/dev/null && command -v visudo >/dev/null || die "sudo/visudo missing (apt install sudo)"
+[ -f /etc/sudoers ] || die "/etc/sudoers missing"
+grep -Eq '^[#@]includedir[[:space:]]+/etc/sudoers\.d' /etc/sudoers || die "/etc/sudoers does not include /etc/sudoers.d"
+if python3 -c 'import gi; gi.require_version("Gtk","3.0"); from gi.repository import Gtk' 2>/dev/null; then echo "dialog toolkit: GTK3 via python3-gi"
+elif command -v zenity >/dev/null; then echo "dialog toolkit: zenity"
+else die "no dialog toolkit (python3-gi + gir1.2-gtk-3.0, or zenity); install one: apt install gir1.2-gtk-3.0 python3-gi"; fi
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+@@FILES@@
+python3 -m py_compile "$T/helper" "$T/gui" || die "payload corrupt (python compile failed)"
+visudo -cf "$T/sudoers" >/dev/null || die "sudoers snippet invalid"
+install -d -m 0755 /usr/local/sbin /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
+install -m 0755 -o root -g root "$T/helper" /usr/local/sbin/omamobile-reboot-android
+install -m 0755 -o root -g root "$T/gui" /usr/local/bin/omamobile-reboot-android-gui
+install -m 0644 "$T/svg" /usr/share/icons/hicolor/scalable/apps/omamobile-reboot-android.svg
+install -m 0644 "$T/desktop" /usr/share/applications/omamobile-reboot-android.desktop
+install -d -m 0750 /etc/sudoers.d
+install -m 0440 -o root -g root "$T/sudoers" /etc/sudoers.d/omamobile-reboot-android
+visudo -c >/dev/null || { rm -f /etc/sudoers.d/omamobile-reboot-android; die "visudo -c failed after install; sudoers snippet removed"; }
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+command -v update-desktop-database >/dev/null && update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+echo "installed:"; ls -l /usr/local/sbin/omamobile-reboot-android /usr/local/bin/omamobile-reboot-android-gui /etc/sudoers.d/omamobile-reboot-android /usr/share/applications/omamobile-reboot-android.desktop
+echo "--- sudo rule as seen by $U (must list the helper with NOPASSWD):"
+runuser -u "$U" -- sudo -n -l /usr/local/sbin/omamobile-reboot-android apply || echo "WARNING: sudo rule not effective for $U"
+echo "--- helper status (read-only):"
+/usr/local/sbin/omamobile-reboot-android status || echo "WARNING: status failed; apply would refuse (see message above)"
+echo "INSTALL DONE. The app 'إعادة التشغيل إلى أندرويد' is in the app grid (log out/in or wait a few seconds if it is not there yet)."

@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# run-with python3
+def __ne(a, b):
+    return not (a == b)
+# Phosh launcher: confirm, then ask the root helper (narrow sudoers rule) to make Android (slot a) the next boot and reboot.
+# GTK3 via python3-gi (already on the Phosh image); falls back to zenity if GTK is missing. --dry-run shows the dialogs and changes nothing.
+import os, subprocess, sys, tempfile, shutil
+
+HELPER = ["sudo", "-n", "/usr/local/sbin/omamobile-reboot-android", "apply"]
+DRY = "--dry-run" in sys.argv
+TITLE = "إعادة التشغيل إلى أندرويد"
+ASK_AR = ("سيتم إعادة تشغيل الهاتف إلى أندرويد (الخانة A).\n"
+          "أوبونتو وبياناتها على قسم مستقل ولن تُمسّ.\n"
+          "للرجوع إلى أوبونتو لاحقاً: من الماك نفّذ  fastboot --set-active=b  ثم  fastboot reboot")
+ASK_EN = ("Reboot the phone into Android (slot A)?\n"
+          "Ubuntu and its data stay on their own partition, untouched.\n"
+          "To come back to Ubuntu later: on the Mac run  fastboot --set-active=b  then  fastboot reboot")
+ASK = ASK_AR + "\n\n" + ASK_EN
+
+
+def run_helper():
+    """returns (rc, output)"""
+    if DRY:
+        return 0, "dry run: would run: " + " ".join(HELPER)
+    with tempfile.TemporaryFile("w+") as out:
+        rc = subprocess.run(HELPER, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL).returncode
+        out.seek(0)
+        return rc, out.read()
+
+
+def tail(text, n=14):
+    return "\n".join(text.strip().splitlines()[-n:]) or "(no output)"
+
+
+def gtk_main():
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("omamobile-reboot-android")
+    GLib.set_application_name(TITLE)
+    Gtk.Window.set_default_icon_name("omamobile-reboot-android")
+
+    d = Gtk.MessageDialog(message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.NONE, text=TITLE + "\nReboot to Android",
+                          secondary_text=ASK)
+    d.set_title(TITLE)
+    d.add_button("إلغاء / Cancel", Gtk.ResponseType.CANCEL)
+    d.add_button("أندرويد / Android", Gtk.ResponseType.OK)
+    d.set_default_response(Gtk.ResponseType.CANCEL)
+    resp = d.run()
+    d.destroy()
+    if __ne(resp , Gtk.ResponseType.OK):
+        return 0
+
+    busy = Gtk.MessageDialog(message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.NONE,
+                             text="جاري التبديل إلى أندرويد…\nSwitching to Android, the phone will reboot…")
+    busy.set_title(TITLE)
+    busy.show_all()
+    result = {}
+
+    def work():
+        import threading
+        def t():
+            result["r"] = run_helper()
+            GLib.idle_add(done)
+        threading.Thread(target=t, daemon=True).start()
+
+    def done():
+        rc, out = result["r"]
+        if rc == 0:
+            if DRY:
+                busy.destroy()
+                m = Gtk.MessageDialog(message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.CLOSE, text="dry run", secondary_text=out)
+                m.run(); m.destroy(); Gtk.main_quit()
+            return False                                   # real run: the helper is rebooting the phone; keep the message up
+        busy.destroy()
+        m = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+                              text="فشل التبديل — لم يتم إعادة التشغيل\nSwitch failed, not rebooting",
+                              secondary_text=tail(out))
+        m.run(); m.destroy(); Gtk.main_quit()
+        return False
+
+    GLib.idle_add(lambda: (work(), False)[1])
+    Gtk.main()
+    return 0
+
+
+def zenity_main():
+    z = shutil.which("zenity")
+    if not z:
+        return None
+    if __ne(subprocess.run([z, "--question", "--title", TITLE, "--text", ASK, "--ok-label", "Android", "--cancel-label", "Cancel"]).returncode , 0):
+        return 0
+    rc, out = run_helper()
+    if __ne(rc , 0):
+        subprocess.run([z, "--error", "--title", TITLE, "--text", "Switch failed, not rebooting\n\n" + tail(out)])
+    return rc
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(gtk_main())
+    except (ImportError, ValueError) as e:
+        sys.stderr.write("GTK unavailable (%s); trying zenity\n" % e)
+        r = zenity_main()
+        if r is None:
+            sys.stderr.write("no GTK and no zenity: cannot show a dialog; refusing to switch without confirmation\n")
+            sys.exit(1)
+        sys.exit(r)

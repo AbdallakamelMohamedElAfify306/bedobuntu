@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+title: "bedobuntu: Cheetah Dual (Ubuntu + Phosh for Pixel 7 Pro)"
+message: "If you use this software, please cite it using these metadata."
+type: software
+authors:
+  - given-names: "Abdalla"
+    family-names: "Kamel Mohamed El Afify"
+    email: abdallahkamel306@gmail.com
+    orcid: "https://orcid.org/0009-0009-0417-1070"
+repository-code: "https://github.com/AbdallakamelMohamedElAfify306/bedobuntu"
+abstract: "Scripts and documentation for running Ubuntu 24.04 with Phosh on a Google Pixel 7 Pro (cheetah) alongside Android, with two-way switch helpers and a shared ext4 partition."
+keywords:
+  - pixel-7-pro
+  - cheetah
+  - ubuntu
+  - phosh
+  - dual-boot
+  - android
+license: GPL-3.0-or-later
+version: 0.1.0
+date-released: 2026-10-31

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Root Toggle</string>
+    <string name="bank_name">وضع البنك</string>
+    <string name="root_name">وضع الروت</string>
+    <string name="confirm_unroot_title">وضع البنك (إلغاء الروت)</string>
+    <string name="confirm_unroot_msg">التليفون هيكتب صورة init_boot الأصلية ويعمل ريستارت.\n\nالروت هيروح. Ubuntu والبارتيشن المشترك مش هيتلمسوا.\n\nعلشان ترجع الروت بعدين: وصّل الماك وشغّل\nbash $HOME/cheetah-dual/root-toggle/mac/reroot.sh\n\nالبوت لودر هيفضل مفتوح - بعض البنوك ممكن تفضل ترفض.</string>
+    <string name="confirm_reroot_title">وضع الروت (إرجاع الروت)</string>
+    <string name="confirm_reroot_msg">لو الروت لسه شغال، هيرجع صورة Magisk ويعمل ريستارت.\n\nلو الروت مش موجود (بعد وضع البنك)، الزر ده مش هيقدر لوحده - استخدم الماك.</string>
+    <string name="btn_go">تنفيذ وإعادة تشغيل</string>
+    <string name="btn_cancel">إلغاء</string>
+    <string name="btn_ok">تمام</string>
+    <string name="working">جاري التنفيذ…</string>
+    <string name="result_title">النتيجة</string>
+    <string name="need_mac_title">محتاج الماك</string>
+    <string name="need_mac_msg">الروت مش موجود على التليفون دلوقتي.\n\nوصّل الماك بالكابل وشغّل الأمر ده:\n\nbash $HOME/cheetah-dual/root-toggle/mac/reroot.sh\n\nالأمر بيوصل التليفون لوضع fastboot ويرجع صورة Magisk على init_boot_a بس. Ubuntu مش هتتلمس.</string>
+    <string name="denied_hint">لو مفيش صلاحية روت: افتح Magisk ثم Superuser وفعّل Root Toggle أو وضع البنك، وبعدين جرّب تاني.</string>
+    <string name="status_title">الحالة</string>
+</resources>

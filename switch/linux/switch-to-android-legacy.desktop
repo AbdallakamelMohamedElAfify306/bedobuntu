@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Reboot to Android
+Comment=Make Android (slot A) the next boot. This can erase Ubuntu data.
+Exec=kgx -e "sudo /usr/local/bin/switch-slot a --apply --reboot"
+Icon=system-reboot
+Terminal=false
+Categories=System;

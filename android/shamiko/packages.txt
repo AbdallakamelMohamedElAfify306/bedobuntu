@@ -1,0 +1,7 @@
+# Banking / wallet packages for DenyList (tick ALL processes)
+# Payoneer and Telda already work; still safe to leave them listed if present.
+com.htsu.hsbcpersonalbanking
+com.ofss.obdx.and.nbe.com.eg
+com.emeint.android.myservices
+com.egyptianbanks.instapay
+com.paypal.android.p2pmobile
