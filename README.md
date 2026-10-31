@@ -123,3 +123,5 @@ Download yourself; do not commit binaries into this repo:
 GPL-3.0-or-later for original scripts unless a file says otherwise (SPDX headers).
 Omarchy-derived helpers keep the MIT notice. Kernel work remains GPL-2.0.
 See NOTICE and LICENSES/.
+
+**DOI:** [10.5281/zenodo.23826278](https://doi.org/10.5281/zenodo.23826278)
